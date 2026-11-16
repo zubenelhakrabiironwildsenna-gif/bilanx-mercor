@@ -52,9 +52,9 @@ async function ensureDbInitialized() {
         {
           id: crypto.randomUUID(),
           timestamp: new Date(Date.now() - 3600000).toISOString(),
-          userId: "108392183928172648102",
+          userId: "seed-auditor-01",
           email: "auditor.compliance@oecd-bilanx.org",
-          name: "European Commission Auditor",
+          name: "Compliance Auditor (Seed)",
           picture: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
           authMethod: "google_jwt_verified",
           action: "LOGIN_SUCCESS",
@@ -125,6 +125,9 @@ function schedulePersistLogs() {
     writeDebounceTimer = null;
     persistLogs().catch(err => console.error("[AccessLogDb] Persist error:", err));
   }, 50);
+  if (writeDebounceTimer.unref) {
+    writeDebounceTimer.unref();
+  }
 }
 
 const GCP_PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_PROJECT || '';

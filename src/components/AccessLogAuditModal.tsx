@@ -57,6 +57,7 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
   const [search, setSearch] = useState('');
   const [actionFilter, setActionFilter] = useState('ALL');
   const [isClearing, setIsClearing] = useState(false);
+  const [confirmingClear, setConfirmingClear] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -69,41 +70,38 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
       if (actionFilter !== 'ALL') params.set('action', actionFilter);
       params.set('limit', '100');
 
-      // Helper function with automatic retry and strict Content-Type validation
-      // Prevents HTML warmup/proxy fallback payloads from throwing syntax errors on JSON parsing
       const fetchJsonSafely = async (url: string, retries = 2, delayMs = 600): Promise<any> => {
         for (let attempt = 0; attempt <= retries; attempt++) {
-          try {
-            const userSession = localStorage.getItem('bilanx_verified_google_user');
-            const token = userSession ? JSON.parse(userSession).sessionToken : null;
-            
-            const res = await fetch(url, {
-              headers: { 
-                Accept: 'application/json',
-                ...(token ? { Authorization: `Bearer ${token}` } : {})
-              }
-            });
-            const contentType = res.headers.get('content-type') || '';
-            if (!contentType.includes('application/json')) {
-              // Might be transient proxy warmup page
-              if (attempt < retries) {
-                await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
-                continue;
-              }
-              throw new Error(`Expected JSON but server returned ${contentType || 'non-JSON response'}`);
+          const userSession = localStorage.getItem('bilanx_verified_google_user');
+          const token = userSession ? JSON.parse(userSession).sessionToken : null;
+
+          const res = await fetch(url, {
+            headers: {
+              Accept: 'application/json',
+              ...(token ? { Authorization: `Bearer ${token}` } : {})
             }
-            if (!res.ok) {
-              const errBody = await res.json().catch(() => null);
-              throw new Error(errBody?.error || `Request failed (HTTP ${res.status})`);
-            }
-            return await res.json();
-          } catch (err: any) {
+          });
+
+          if (res.status === 401 || res.status === 403) {
+            const authErr: any = new Error('Authentication required. Please sign in to view the Access Audit Database.');
+            authErr.isAuthError = true;
+            throw authErr;
+          }
+
+          const contentType = res.headers.get('content-type') || '';
+          if (!contentType.includes('application/json')) {
             if (attempt < retries) {
               await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
               continue;
             }
-            throw err;
+            throw new Error(`Expected JSON but server returned ${contentType || 'non-JSON response'}`);
           }
+
+          if (!res.ok) {
+            const errBody = await res.json().catch(() => null);
+            throw new Error(errBody?.error || `Request failed (HTTP ${res.status})`);
+          }
+          return await res.json();
         }
       };
 
@@ -122,7 +120,11 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
       }
     } catch (err: any) {
       console.warn("[AccessLogAuditModal] Notice loading access logs:", err?.message || err);
-      setErrorMsg("Unable to synchronize access logs right now. The server may be warming up.");
+      setErrorMsg(
+        err?.isAuthError
+          ? err.message
+          : (err?.message || "Unable to synchronize access logs right now.")
+      );
     } finally {
       setLoading(false);
     }
@@ -130,43 +132,49 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
 
   useEffect(() => {
     if (isOpen) {
+      setConfirmingClear(false);
       fetchLogs();
     }
   }, [isOpen, fetchLogs]);
 
   const handleClearLogs = async () => {
-    if (!window.confirm("Are you sure you want to clear the local Access Logs database? This cannot be undone.")) {
-      return;
-    }
     setIsClearing(true);
+    setErrorMsg(null);
     try {
       const userSession = localStorage.getItem('bilanx_verified_google_user');
       const token = userSession ? JSON.parse(userSession).sessionToken : null;
-      
-      const res = await fetch('/api/access-logs/clear', { 
+
+      const res = await fetch('/api/access-logs/clear', {
         method: 'POST',
         headers: token ? { Authorization: `Bearer ${token}` } : undefined
       });
-      if (res.ok) {
-        setFeedbackMsg("Access log database successfully cleared.");
-        setTimeout(() => setFeedbackMsg(null), 3500);
-        await fetchLogs();
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.error || `Failed to clear logs (HTTP ${res.status})`);
       }
-    } catch (e) {
-      console.error("Failed to clear database:", e);
+      setConfirmingClear(false);
+      setFeedbackMsg("Access log database successfully cleared.");
+      setTimeout(() => setFeedbackMsg(null), 3500);
+      await fetchLogs();
+    } catch (err: any) {
+      setErrorMsg(err?.message || "Failed to clear access log database.");
     } finally {
       setIsClearing(false);
     }
   };
 
   const handleExportCsv = async () => {
+    setErrorMsg(null);
     const userSession = localStorage.getItem('bilanx_verified_google_user');
     const token = userSession ? JSON.parse(userSession).sessionToken : '';
     try {
       const res = await fetch('/api/access-logs/export', {
         headers: token ? { 'Authorization': `Bearer ${token}` } : {}
       });
-      if (!res.ok) throw new Error('Export request failed');
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.error || `Export failed (HTTP ${res.status})`);
+      }
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -176,9 +184,10 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
       a.click();
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
-    } catch (err) {
-      console.warn('Direct CSV blob download failed, attempting fallback navigation:', err);
-      window.location.href = `/api/access-logs/export?token=${token}`;
+      setFeedbackMsg("Audit log CSV exported.");
+      setTimeout(() => setFeedbackMsg(null), 3000);
+    } catch (err: any) {
+      setErrorMsg(err?.message || "Unable to export access logs CSV.");
     }
   };
 
@@ -357,7 +366,7 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
               <p className="text-xs text-slate-500">Sign in with Google or perform compliance checks to generate real-time audit records.</p>
             </div>
           ) : (
-            <table className="w-full text-left text-xs text-slate-300 border-collapse">
+            <table className="w-full text-left text-xs text-slate-300 border-collapse" data-testid="audit-log-table">
               <thead className="bg-slate-950/70 text-[10px] font-mono uppercase text-slate-400 sticky top-0 z-10 border-b border-slate-800">
                 <tr>
                   <th className="py-2.5 px-4">Timestamp</th>
@@ -369,7 +378,17 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/40">
-                {logs.map((log) => (
+                {logs.map((log) => {
+                  const detailNote =
+                    log.metadata?.reason ||
+                    (log.metadata?.checkType
+                      ? `${log.metadata.checkType}${log.metadata.proofByteLength ? ` (${log.metadata.proofByteLength}B)` : ''}${log.metadata.institutionId ? ` · ${log.metadata.institutionId}` : ''}`
+                      : log.metadata?.loa
+                        ? `LoA ${log.metadata.loa}${log.metadata.role ? ` · ${log.metadata.role}` : ''}`
+                        : null);
+                  const shortUid = log.userId.length > 16 ? `${log.userId.slice(0, 16)}...` : log.userId;
+
+                  return (
                   <tr key={log.id} className="hover:bg-slate-800/40 transition-colors">
                     
                     {/* Timestamp */}
@@ -401,7 +420,7 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
                         <div className="min-w-0">
                           <div className="font-medium text-white truncate max-w-[180px]">{log.name}</div>
                           <div className="text-[10px] text-slate-400 font-mono truncate max-w-[180px]">{log.email}</div>
-                          <div className="text-[9px] text-slate-500 font-mono truncate max-w-[180px]">UID: {log.userId.slice(0, 12)}...</div>
+                          <div className="text-[9px] text-slate-500 font-mono truncate max-w-[180px]">UID: {shortUid}</div>
                         </div>
                       </div>
                     </td>
@@ -419,6 +438,11 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
                       }`}>
                         {log.action}
                       </span>
+                      {detailNote && (
+                        <div className="text-[10px] text-slate-400 font-mono mt-1 truncate max-w-[220px]" title={String(detailNote)}>
+                          {String(detailNote)}
+                        </div>
+                      )}
                     </td>
 
                     {/* Status */}
@@ -447,7 +471,8 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
                     </td>
 
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -460,15 +485,39 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
           </div>
 
           <div className="flex items-center gap-3">
+            {confirmingClear ? (
+              <div className="flex items-center gap-2 bg-red-950/60 border border-red-800/80 px-2.5 py-1 rounded-lg">
+                <span className="text-[11px] text-red-200">Clear all records?</span>
+                <button
+                  type="button"
+                  onClick={handleClearLogs}
+                  disabled={isClearing}
+                  className="px-2 py-0.5 bg-red-600 hover:bg-red-500 text-white rounded text-[11px] font-semibold cursor-pointer disabled:opacity-60"
+                >
+                  {isClearing ? 'Clearing...' : 'Confirm Clear'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingClear(false)}
+                  disabled={isClearing}
+                  className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-[11px] cursor-pointer"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmingClear(true)}
+                disabled={isClearing}
+                className="text-red-400 hover:text-red-300 text-[11px] flex items-center gap-1 transition-colors cursor-pointer px-2 py-1 hover:bg-red-950/40 rounded"
+              >
+                <Trash2 size={12} />
+                <span>Clear Log History</span>
+              </button>
+            )}
             <button
-              onClick={handleClearLogs}
-              disabled={isClearing}
-              className="text-red-400 hover:text-red-300 text-[11px] flex items-center gap-1 transition-colors cursor-pointer px-2 py-1 hover:bg-red-950/40 rounded"
-            >
-              <Trash2 size={12} />
-              <span>{isClearing ? 'Clearing...' : 'Clear Log History'}</span>
-            </button>
-            <button
+              type="button"
               onClick={onClose}
               className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-semibold transition-colors cursor-pointer"
             >

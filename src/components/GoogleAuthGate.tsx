@@ -13,7 +13,6 @@ interface GoogleAuthGateProps {
   authError: string | null;
   onClearError: () => void;
   onInstantVerify: (email?: string, name?: string) => Promise<VerifiedGoogleUser>;
-  onOpenAuditLogs: () => void;
 }
 
 const DEFUNCT_CLIENT_IDS = new Set([
@@ -38,8 +37,7 @@ export function GoogleAuthGate({
   isVerifying,
   authError,
   onClearError,
-  onInstantVerify,
-  onOpenAuditLogs
+  onInstantVerify
 }: GoogleAuthGateProps) {
   const [gsiLoaded, setGsiLoaded] = useState(false);
   const [resolvedClientId, setResolvedClientId] = useState<string | null>(() =>
@@ -285,15 +283,8 @@ export function GoogleAuthGate({
         </div>
 
         {/* Footer */}
-        <div className="bg-slate-950 px-6 py-3.5 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-500 font-mono">
+        <div className="bg-slate-950 px-6 py-3.5 border-t border-slate-800 flex items-center justify-center text-[11px] text-slate-500 font-mono">
           <span>eIDAS 2.0 Node Sandbox</span>
-          <button 
-            type="button"
-            onClick={onOpenAuditLogs}
-            className="text-slate-400 hover:text-white transition-colors cursor-pointer flex items-center gap-1"
-          >
-            <span>Audit Logs</span>
-          </button>
         </div>
 
       </div>

@@ -69,7 +69,6 @@ export default function App() {
           authError={authError}
           onClearError={clearAuthError}
           onInstantVerify={instantVerify}
-          onOpenAuditLogs={() => setShowAuditModal(true)}
         />
       ) : (
         <BilanxApp 

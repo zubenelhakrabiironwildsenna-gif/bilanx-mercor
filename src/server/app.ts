@@ -723,32 +723,31 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
     }
   });
 
-  // Record runtime user action/access event into Database
-  app.post("/api/auth/record-event", async (req, res) => {
+  // Record runtime user action/access event into Database (authenticated)
+  app.post("/api/auth/record-event", requireAuth, async (req, res) => {
     try {
-      const { user, action, metadata } = req.body;
+      const { action, metadata } = req.body || {};
+      const sessionUser = req.user!;
       const clientIp = getClientIp(req);
       const userAgent = req.headers['user-agent'] || 'Unknown Browser';
 
+      const allowedActions = new Set(['APP_ACCESS', 'COMPLIANCE_RUN', 'SESSION_VALIDATE']);
+      const safeAction = typeof action === 'string' && allowedActions.has(action)
+        ? (action as 'APP_ACCESS' | 'COMPLIANCE_RUN' | 'SESSION_VALIDATE')
+        : 'APP_ACCESS';
+
       const log = await recordAccessLog({
-        userId: user?.uid || 'guest',
-        email: user?.email || 'guest@session',
-        name: user?.name || 'Guest User',
-        picture: user?.picture,
-        authMethod: user?.uid ? 'credential_verification' : 'guest_audit',
-        action: action || 'APP_ACCESS',
+        userId: sessionUser.uid,
+        email: sessionUser.email,
+        name: sessionUser.name,
+        picture: sessionUser.picture,
+        authMethod: 'credential_verification',
+        action: safeAction,
         ipAddress: clientIp,
         userAgent,
         status: 'SUCCESS',
-        metadata: metadata || {}
+        metadata: metadata && typeof metadata === 'object' ? metadata : {}
       });
-
-      if (action === 'LOGOUT') {
-        const token = extractSessionToken(req);
-        if (token) {
-          globalSessionStore.deleteSession(token);
-        }
-      }
 
       res.json({ success: true, log });
     } catch (err: unknown) {
@@ -907,12 +906,13 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
         issuer: claims.issuer,
       };
 
+      const samlAuditUid = `saml-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+      sessionUser.uid = samlAuditUid;
       const { token: sessionToken } = globalSessionStore.createSession(sessionUser);
-      sessionUser.uid = sessionToken; // use session token as uid for logs
       setSessionCookie(res, sessionToken);
 
       await recordAccessLog({
-        userId: sessionToken,
+        userId: samlAuditUid,
         email: 'verified@eidas.europa.eu',
         name: 'eIDAS User',
         authMethod: 'eidas_saml',
@@ -973,8 +973,10 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
     try {
       const search = (req.query.search as string) || '';
       const action = (req.query.action as string) || '';
-      const limit = parseInt(req.query.limit as string, 10) || 50;
-      const offset = parseInt(req.query.offset as string, 10) || 0;
+      const parsedLimit = parseInt(req.query.limit as string, 10);
+      const parsedOffset = parseInt(req.query.offset as string, 10);
+      const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 500) : 50;
+      const offset = Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0;
 
       const result = await getAccessLogs({ search, action, limit, offset });
       res.json(result);
@@ -1123,6 +1125,25 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
       const t0 = performance.now();
       const isValid = await verifyProof(proofBytes);
       const verify_ms = performance.now() - t0;
+
+      const token = extractSessionToken(req);
+      const activeSession = token ? globalSessionStore.getSession(token) : null;
+      await recordAccessLog({
+        userId: activeSession?.uid || 'pos-terminal',
+        email: activeSession?.email || 'pos-terminal@eidas-node.local',
+        name: activeSession?.name || 'POS Age-Gate Verifier',
+        authMethod: activeSession ? 'credential_verification' : 'eidas_saml',
+        action: 'COMPLIANCE_RUN',
+        ipAddress: getClientIp(req),
+        userAgent: req.headers['user-agent'] || 'Unknown Client',
+        status: isValid ? 'SUCCESS' : 'DENIED',
+        metadata: {
+          checkType: 'zkp_age_gate',
+          proofByteLength: proofBytes.length,
+          verifyMs: Math.round(verify_ms * 100) / 100,
+          ...(isValid ? {} : { reason: 'Zero-knowledge range proof verification failed' }),
+        },
+      });
       
       if (isValid) {
         res.status(200).json({
@@ -1245,6 +1266,24 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
         signatureBuffer,
         messageBuffer
       );
+
+      const token = extractSessionToken(req);
+      const activeSession = token ? globalSessionStore.getSession(token) : null;
+      await recordAccessLog({
+        userId: activeSession?.uid || 'pos-terminal',
+        email: activeSession?.email || 'pos-terminal@eidas-node.local',
+        name: activeSession?.name || 'POS Dual-Key Verifier',
+        authMethod: activeSession ? 'credential_verification' : 'eidas_saml',
+        action: 'COMPLIANCE_RUN',
+        ipAddress: getClientIp(req),
+        userAgent: req.headers['user-agent'] || 'Unknown Client',
+        status: isValid ? 'SUCCESS' : 'DENIED',
+        metadata: {
+          checkType: 'dual_key_handshake',
+          institutionId: challengeRecord.institutionId,
+          ...(isValid ? {} : { reason: 'User ECDSA signature verification failed' }),
+        },
+      });
 
       if (isValid) {
         res.status(200).json({ valid: true });
